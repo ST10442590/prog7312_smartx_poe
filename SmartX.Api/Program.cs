@@ -13,6 +13,7 @@ builder.Services.AddSingleton<CommandStreamService>();
 builder.Services.AddSingleton<DeviceIndex>();
 builder.Services.AddSingleton<SuggestionEngine>();
 builder.Services.AddSingleton<TelemetryHistory>();
+builder.Services.AddSingleton<MeshNetworkService>();
 builder.Services.AddScoped<TopologyBuilder>();
 builder.Services.AddHostedService<MeshSimulator>();
 
@@ -33,6 +34,16 @@ builder.Services.AddCors(options =>
 });
 
 var app = builder.Build();
+
+// The mesh graph is derived from the registry, so it is built once the
+// host is up and the simulator has registered its devices.
+_ = Task.Run(async () =>
+{
+    // The simulator registers devices on its own schedule, so wait briefly
+    // rather than racing it to an empty registry.
+    await Task.Delay(TimeSpan.FromSeconds(2));
+    app.Services.GetRequiredService<MeshNetworkService>().Build();
+});
 
 if (app.Environment.IsDevelopment())
 {
@@ -591,5 +602,148 @@ app.MapGet("/api/history/{deviceId}/compare", (
 })
 .WithName("CompareRangeStrategies")
 .WithSummary("Tree range query versus linear scan over the same window.");
+
+// ------------------------------------------------------ mesh topology
+// The mesh as a weighted graph: vertices are nodes, edges are radio links
+// weighted by transmission cost.
+app.MapGet("/api/mesh/graph", (MeshNetworkService mesh) =>
+{
+    mesh.SyncOutages();
+    var graph = mesh.Graph;
+
+    return Results.Ok(new
+    {
+        vertices = graph.VertexCount,
+        edges = graph.EdgeCount,
+        builtAtUtc = mesh.BuiltAtUtc,
+        nodes = graph.Vertices
+            .OrderBy(v => v, StringComparer.OrdinalIgnoreCase)
+            .Select(v => new
+            {
+                id = v,
+                online = graph.IsOnline(v),
+                degree = graph.NeighboursOf(v).Count
+            }),
+        links = graph.AllEdges().OrderBy(e => e.Weight)
+    });
+})
+.WithName("GetMeshGraph")
+.WithSummary("The mesh topology as vertices and weighted edges.");
+
+// Rebuilds the topology, for after devices have been registered.
+app.MapPost("/api/mesh/graph/rebuild", (MeshNetworkService mesh) =>
+{
+    mesh.Build();
+    return Results.Ok(new
+    {
+        rebuilt = true,
+        vertices = mesh.Graph.VertexCount,
+        edges = mesh.Graph.EdgeCount
+    });
+})
+.WithName("RebuildMeshGraph")
+.WithSummary("Rebuilds the mesh graph from the device registry.");
+
+// BFS from the gateway: which devices are reachable, and how far away.
+app.MapGet("/api/mesh/reachability", (MeshNetworkService mesh, bool? includeOffline) =>
+{
+    mesh.SyncOutages();
+    var result = mesh.Reachability(respectOutages: !(includeOffline ?? false));
+
+    return Results.Ok(new
+    {
+        result.Algorithm,
+        result.Start,
+        result.Visited,
+        result.EdgesExamined,
+        reachable = result.HopCounts
+            .OrderBy(h => h.Value)
+            .ThenBy(h => h.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(h => new { device = h.Key, hops = h.Value }),
+        result.Unreachable
+    });
+})
+.WithName("GetReachability")
+.WithSummary("Breadth-first reachability from the gateway, with hop counts.");
+
+// Either traversal from any starting node.
+app.MapGet("/api/mesh/traverse/{start}", (
+    string start, MeshNetworkService mesh, bool? depthFirst) =>
+{
+    mesh.SyncOutages();
+    var result = mesh.Traverse(start, depthFirst ?? false);
+
+    return Results.Ok(new
+    {
+        result.Algorithm,
+        result.Start,
+        result.Visited,
+        result.EdgesExamined,
+        result.Order,
+        result.Unreachable
+    });
+})
+.WithName("TraverseMesh")
+.WithSummary("Breadth-first or depth-first traversal from a given node.");
+
+// The hop-by-hop route a packet takes from a device back to the gateway.
+app.MapGet("/api/mesh/route/{deviceId}", (
+    string deviceId, MeshNetworkService mesh) =>
+{
+    mesh.SyncOutages();
+    var route = mesh.RouteToGateway(deviceId);
+
+    return route.Count == 0
+        ? Results.NotFound(new
+        {
+            deviceId,
+            error = "No route to the gateway. The device is offline or stranded."
+        })
+        : Results.Ok(new { deviceId, hops = route.Count - 1, route });
+})
+.WithName("GetRouteToGateway")
+.WithSummary("Fewest-hop route from a device to the gateway.");
+
+// Prim's MST: the cheapest set of links that still reaches every node.
+app.MapGet("/api/mesh/mst", (MeshNetworkService mesh, bool? includeOffline) =>
+{
+    mesh.SyncOutages();
+    var result = mesh.MinimumSpanningTree(respectOutages: !(includeOffline ?? false));
+    var allEdges = mesh.Graph.AllEdges();
+
+    var fullWeight = Math.Round(allEdges.Sum(e => e.Weight), 2);
+
+    return Results.Ok(new
+    {
+        result.Algorithm,
+        result.Start,
+        result.VerticesSpanned,
+        edgeCount = result.Edges.Count,
+        result.TotalWeight,
+
+        // What it would cost to keep every link powered, for comparison.
+        allLinksWeight = fullWeight,
+        savingPercent = fullWeight == 0
+            ? 0
+            : Math.Round((1 - result.TotalWeight / fullWeight) * 100, 1),
+
+        result.IsComplete,
+        result.EdgesExamined,
+        result.HeapComparisons,
+        edges = result.Edges.OrderBy(e => e.Weight)
+    });
+})
+.WithName("GetMinimumSpanningTree")
+.WithSummary("Prim's minimum spanning tree over the mesh.");
+
+// What-if: take a node out and see whether the mesh heals around it.
+app.MapPost("/api/mesh/simulate-failure/{deviceId}", (
+    string deviceId, MeshNetworkService mesh) =>
+{
+    mesh.SyncOutages();
+    return Results.Ok(mesh.SimulateFailure(deviceId));
+})
+.WithName("SimulateNodeFailure")
+.WithSummary("Removes a node and reports what is stranded or rerouted.");
 
 app.Run();
