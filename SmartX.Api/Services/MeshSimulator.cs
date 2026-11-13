@@ -21,6 +21,7 @@ public sealed class MeshSimulator : BackgroundService
     private readonly CommandStreamService _stream;
     private readonly DeviceIndex _index;
     private readonly SuggestionEngine _engine;
+    private readonly TelemetryHistory _history;
     private readonly ILogger<MeshSimulator> _logger;
 
     // Seeded so every run produces the same sequence. A demo that behaves
@@ -55,6 +56,7 @@ public sealed class MeshSimulator : BackgroundService
         CommandStreamService stream,
         DeviceIndex index,
         SuggestionEngine engine,
+        TelemetryHistory history,
         ILogger<MeshSimulator> logger)
     {
         _registry = registry;
@@ -62,6 +64,7 @@ public sealed class MeshSimulator : BackgroundService
         _stream = stream;
         _index = index;
         _engine = engine;
+        _history = history;
         _logger = logger;
     }
 
@@ -289,6 +292,9 @@ public sealed class MeshSimulator : BackgroundService
 
             // Timeline bucket for the dashboard graph.
             _index.Record(packet);
+
+            // Per-device AVL tree, for timestamp range queries.
+            _history.Record(packet);
 
             // Live scoring for the Pulse Grid, which also tells us whether
             // this reading warrants an alert.

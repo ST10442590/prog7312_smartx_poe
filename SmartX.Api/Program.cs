@@ -12,6 +12,7 @@ builder.Services.AddSingleton<TelemetryArchive>();
 builder.Services.AddSingleton<CommandStreamService>();
 builder.Services.AddSingleton<DeviceIndex>();
 builder.Services.AddSingleton<SuggestionEngine>();
+builder.Services.AddSingleton<TelemetryHistory>();
 builder.Services.AddScoped<TopologyBuilder>();
 builder.Services.AddHostedService<MeshSimulator>();
 
@@ -56,7 +57,8 @@ app.MapPost("/api/telemetry", (
     DeviceRegistry registry,
     TelemetryArchive archive,
     CommandStreamService stream,
-    DeviceIndex index) =>
+    DeviceIndex index,
+    TelemetryHistory history) =>
 {
     var errors = dto.Validate();
     if (errors.Count > 0)
@@ -77,6 +79,7 @@ app.MapPost("/api/telemetry", (
     archive.Ingest([packet], dto.Unit);
     stream.EnqueuePacket(packet);
     index.Record(packet);
+    history.Record(packet);
 
     return Results.Ok(new { dto.DeviceId, zScore = Math.Round(score.Value, 2) });
 })
@@ -88,7 +91,8 @@ app.MapPost("/api/telemetry/batch", (
     DeviceRegistry registry,
     TelemetryArchive archive,
     CommandStreamService stream,
-    DeviceIndex index) =>
+    DeviceIndex index,
+    TelemetryHistory history) =>
 {
     var accepted = new List<ITelemetryPacket>(packets.Length);
     var rejected = new List<string>();
@@ -111,6 +115,7 @@ app.MapPost("/api/telemetry/batch", (
         accepted.Add(packet);
         stream.EnqueuePacket(packet);
         index.Record(packet);
+        history.Record(packet);
     }
 
     archive.Ingest(accepted, TelemetryUnit.None);
@@ -152,6 +157,8 @@ app.MapGet("/api/devices/{id}", (
 app.MapPost("/api/devices", (
     SensorProfile profile, DeviceRegistry registry, DeviceIndex index) =>
 {
+    // Validation runs here as well as in the browser, so the client is never
+    // the only thing standing between bad data and the mesh.
     if (!registry.TryRegister(profile, out var errors))
     {
         return Results.BadRequest(new { errors });
@@ -343,8 +350,6 @@ app.MapGet("/api/stream/snapshot", (CommandStreamService stream) =>
 .WithName("GetStreamSnapshot")
 .WithSummary("Current depths and contents of the processing structures.");
 
-// Issues a manual override, pushes it onto the undo stack, and records it
-// as an operator action the suggestion engine can learn from.
 app.MapPost("/api/stream/command", (
     IssueCommandDto request,
     CommandStreamService stream,
@@ -469,15 +474,11 @@ app.MapGet("/api/index/timeline/range", (
 .WithSummary("Range query over the sorted timeline.");
 
 // -------------------------------------------------- suggestion engine
-// Current recommendations, plus the learned model behind them so a
-// suggestion can be traced to the observations that produced it.
 app.MapGet("/api/suggestions", (SuggestionEngine engine, int? take) =>
     Results.Ok(engine.Report(take ?? 5)))
 .WithName("GetSuggestions")
 .WithSummary("Proactive suggested actions and the transitions behind them.");
 
-// Device search. The search itself is the signal the engine learns from —
-// what the operator looks for, and what they look for next.
 app.MapGet("/api/suggestions/search", (
     string query,
     DeviceRegistry registry,
@@ -511,7 +512,6 @@ app.MapGet("/api/suggestions/search", (
 .WithName("SearchDevices")
 .WithSummary("Searches devices and records the query for pattern analysis.");
 
-// Dismisses a suggestion, so an acknowledged problem stops resurfacing.
 app.MapPost("/api/suggestions/attend/{deviceId}", (
     string deviceId, SuggestionEngine engine) =>
 {
@@ -521,7 +521,6 @@ app.MapPost("/api/suggestions/attend/{deviceId}", (
 .WithName("MarkAttended")
 .WithSummary("Marks a device as being dealt with.");
 
-// Clears the attention set, so unresolved problems resurface.
 app.MapPost("/api/suggestions/expire-attention", (SuggestionEngine engine) =>
 {
     engine.ExpireAttention();
@@ -537,5 +536,60 @@ app.MapPost("/api/suggestions/reset", (SuggestionEngine engine) =>
 })
 .WithName("ResetSuggestions")
 .WithSummary("Clears the learned model, for demonstrating it learning from scratch.");
+
+// -------------------------------------------------- telemetry history
+// Timestamp range queries against the per-device AVL trees. The response
+// carries the tree's height and the comparison count alongside the data, so
+// the structure's behaviour is visible rather than merely claimed.
+app.MapGet("/api/history/{deviceId}", (
+    string deviceId,
+    TelemetryHistory history,
+    DateTimeOffset? from,
+    DateTimeOffset? to,
+    int? take) =>
+{
+    var now = DateTimeOffset.UtcNow;
+
+    return Results.Ok(history.Query(
+        deviceId,
+        from ?? now.AddMinutes(-10),
+        to ?? now,
+        take ?? 200));
+})
+.WithName("QueryHistory")
+.WithSummary("Range query over one device's timestamped history.");
+
+// Convenience form for "the last N minutes", which is what the dashboard
+// asks for most often.
+app.MapGet("/api/history/{deviceId}/recent", (
+    string deviceId, TelemetryHistory history, int? minutes, int? take) =>
+    Results.Ok(history.QueryRecent(deviceId, minutes ?? 5, take ?? 200)))
+.WithName("QueryRecentHistory")
+.WithSummary("Range query over the last N minutes for one device.");
+
+app.MapGet("/api/history", (TelemetryHistory history) =>
+    Results.Ok(history.Overview()))
+.WithName("GetHistoryOverview")
+.WithSummary("Tree size, height and rotation counts for every device.");
+
+// Same window, two strategies. The narrower the window relative to the
+// tree, the more the pruning saves — which is the point.
+app.MapGet("/api/history/{deviceId}/compare", (
+    string deviceId,
+    TelemetryHistory history,
+    int? fromSecondsAgo,
+    int? toSecondsAgo) =>
+{
+    var now = DateTimeOffset.UtcNow;
+    var from = now.AddSeconds(-Math.Abs(fromSecondsAgo ?? 30));
+    var to = now.AddSeconds(-Math.Abs(toSecondsAgo ?? 20));
+
+    return Results.Ok(history.CompareRangeStrategies(
+        deviceId,
+        from <= to ? from : to,
+        from <= to ? to : from));
+})
+.WithName("CompareRangeStrategies")
+.WithSummary("Tree range query versus linear scan over the same window.");
 
 app.Run();
