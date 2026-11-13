@@ -78,10 +78,47 @@ app.MapPost("/api/telemetry", (
     }
 
     var packet = dto.ToPacket();
+
+    // Part 1 feedback: telemetry was accepted without being checked against the
+    // sensor's registered profile. A node registered to report humidity could
+    // send a Celsius reading and it would be archived, scored and charted under
+    // the wrong unit, with nothing to show the two disagreed. A packet whose
+    // unit or category contradicts its own registration is a misconfigured
+    // node rather than a reading, so it is refused at the boundary.
+    var profile = registry.GetProfile(dto.DeviceId);
+    if (profile is null)
+    {
+        return Results.NotFound(new { error = $"Device '{dto.DeviceId}' is not registered." });
+    }
+
+    if (dto.Unit != profile.Unit)
+    {
+        return Results.BadRequest(new
+        {
+            errors = new[]
+            {
+                $"Device '{dto.DeviceId}' is registered to report in {profile.Unit}, " +
+                $"but this packet reports {dto.Unit}."
+            }
+        });
+    }
+
+    if (packet.Category != profile.Category)
+    {
+        return Results.BadRequest(new
+        {
+            errors = new[]
+            {
+                $"Device '{dto.DeviceId}' is registered as {profile.Category}, " +
+                $"but this packet is categorised {packet.Category}."
+            }
+        });
+    }
+
     var score = registry.Observe(packet);
 
-    // A packet from an unregistered node is a configuration error, not a
-    // silent no-op, so it gets a 404 rather than a 200.
+    // Belt and braces: Observe returns null for a node the registry does not
+    // know, which the profile lookup above should already have caught.
     if (score is null)
     {
         return Results.NotFound(new { error = $"Device '{dto.DeviceId}' is not registered." });
