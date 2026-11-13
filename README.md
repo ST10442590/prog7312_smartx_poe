@@ -10,7 +10,7 @@ downstream when one relay dies.
 
 **Module:** PROG7312 / AAPD7112 — Programming 3B / Advanced Application Development
 **Student:** Thabang Thamae (ST10442590)
-**Video demonstration:** https://youtu.be/REPLACE_WITH_POE_VIDEO_ID
+**Video demonstration:** https://youtu.be/OXOgq16L_vA
 
 ---
 
