@@ -10,6 +10,7 @@ downstream when one relay dies.
 
 **Module:** PROG7312 / AAPD7112 — Programming 3B / Advanced Application Development
 **Student:** Thabang Thamae (ST10442590)
+**Video demonstration:** https://youtu.be/REPLACE_WITH_POE_VIDEO_ID
 
 ---
 
@@ -128,7 +129,7 @@ Per-device statistics, including each tree's height and how many rotations it
 has performed:
 
 ```bash
-curl http://localhost:5145/api/history/stats
+curl http://localhost:5145/api/history
 ```
 
 A representative response after a minute of telemetry:
@@ -146,20 +147,31 @@ A representative response after a minute of telemetry:
 number is the whole point of the structure and is explained under
 [the AVL tree](#the-avl-tree-ordered-history-that-cannot-degrade) below.
 
-A range query over one device's history:
+A range query over one device's history. The convenience form asks for the
+last N minutes, which is what the dashboard uses:
 
 ```bash
-curl "http://localhost:5145/api/history/ESP32-A00/range?fromSecondsAgo=120&toSecondsAgo=0"
+curl "http://localhost:5145/api/history/ESP32-A00/recent?minutes=2&take=200"
 ```
 
-The response reports `matchCount`, `treeSize`, `treeHeight`,
+The general form takes explicit timestamps, and defaults to the last ten
+minutes when both are omitted:
+
+```bash
+curl "http://localhost:5145/api/history/ESP32-A00"
+curl "http://localhost:5145/api/history/ESP32-A00?from=2026-11-13T07:57:00Z&to=2026-11-13T07:59:00Z&take=500"
+```
+
+Either form reports `matchCount`, `treeSize`, `treeHeight`,
 `unbalancedHeight` and `comparisons` alongside the readings themselves, so
 the cost of the query is visible, not asserted.
 
 The comparison endpoint runs the same window twice — once through the tree
-and once as a linear scan — and returns both costs:
+and once as a linear scan — and returns both costs. Its defaults already
+describe a narrow ten-second window, so it needs no parameters:
 
 ```bash
+curl "http://localhost:5145/api/history/ESP32-A00/compare"
 curl "http://localhost:5145/api/history/ESP32-A00/compare?fromSecondsAgo=10&toSecondsAgo=0"
 ```
 
@@ -348,7 +360,7 @@ Height 9 against a theoretical worst case of 399. The AVL invariant — the
 heights of any node's two subtrees differ by at most one — is what produces
 it. Each insertion walks back up the path it came down, recomputes heights,
 and rotates wherever the balance factor reaches ±2. Because the insertions
-are monotonic, almost every one triggers a rotation: the `/api/history/stats`
+are monotonic, almost every one triggers a rotation: the `/api/history`
 endpoint reports **806 rotations across 946 insertions**. That ratio is not a
 defect; it is the structure doing continuously what it was chosen to do. An
 AVL tree with *n* nodes is guaranteed a height below `1.44 · log₂(n)`, so
@@ -673,9 +685,10 @@ requests running against the API.
 | `GET` | `/api/mesh/route/{deviceId}` | Shortest hop path to the gateway |
 | `GET` | `/api/mesh/mst` | Prim's minimum spanning tree and its saving |
 | `POST` | `/api/mesh/simulate-failure/{deviceId}` | Take a node offline and report the re-route |
-| `GET` | `/api/history/stats` | Per-device tree sizes, heights and rotations |
-| `GET` | `/api/history/{deviceId}/range` | AVL range query over a time window |
-| `GET` | `/api/history/{deviceId}/compare` | Tree query vs linear scan, same window |
+| `GET` | `/api/history` | Per-device tree sizes, heights and rotations |
+| `GET` | `/api/history/{deviceId}` | AVL range query — `from`, `to`, `take` |
+| `GET` | `/api/history/{deviceId}/recent` | Last N minutes — `minutes`, `take` |
+| `GET` | `/api/history/{deviceId}/compare` | Tree query vs linear scan — `fromSecondsAgo`, `toSecondsAgo` |
 
 ### Part 2 — command stream, lookups, suggestions
 
