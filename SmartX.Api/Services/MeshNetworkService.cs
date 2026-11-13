@@ -226,16 +226,32 @@ public sealed class MeshNetworkService
                 .Where(v => !string.Equals(v, deviceId, StringComparison.OrdinalIgnoreCase))
                 .ToList();
 
-            // Devices whose hop count changed still reach the gateway, but
-            // by a different route. That is the mesh healing.
+            // A device has rerouted if its hop count changed, or if it still
+            // sits the same distance away but now arrives through a
+            // different neighbour. Comparing hop counts alone misses the
+            // second case, which is common: an equally short alternative
+            // path is exactly what the redundant uplinks provide.
             var rerouted = new List<ReroutedNode>();
 
             foreach (var (vertex, hopsAfter) in after.HopCounts)
             {
                 if (!before.HopCounts.TryGetValue(vertex, out var hopsBefore)) continue;
-                if (hopsBefore == hopsAfter) continue;
 
-                rerouted.Add(new ReroutedNode(vertex, hopsBefore, hopsAfter));
+                before.Parents.TryGetValue(vertex, out var parentBefore);
+                after.Parents.TryGetValue(vertex, out var parentAfter);
+
+                var hopsChanged = hopsBefore != hopsAfter;
+                var nextHopChanged = !string.Equals(
+                    parentBefore, parentAfter, StringComparison.OrdinalIgnoreCase);
+
+                if (!hopsChanged && !nextHopChanged) continue;
+
+                rerouted.Add(new ReroutedNode(
+                    vertex,
+                    hopsBefore,
+                    hopsAfter,
+                    parentBefore ?? "—",
+                    parentAfter ?? "—"));
             }
 
             return new FailureImpactResult
@@ -244,7 +260,9 @@ public sealed class MeshNetworkService
                 ReachableBefore = before.Visited,
                 ReachableAfter = after.Visited,
                 StrandedDevices = strandedNow,
-                ReroutedDevices = rerouted.OrderBy(r => r.DeviceId).ToList(),
+                ReroutedDevices = rerouted
+                    .OrderBy(r => r.DeviceId, StringComparer.OrdinalIgnoreCase)
+                    .ToList(),
                 MstWeightBefore = mstBefore.TotalWeight,
                 MstWeightAfter = mstAfter.TotalWeight,
                 MeshHealed = strandedNow.Count == 0,
@@ -254,7 +272,13 @@ public sealed class MeshNetworkService
     }
 }
 
-public sealed record ReroutedNode(string DeviceId, int HopsBefore, int HopsAfter);
+// One device whose route to the gateway changed when a node was lost.
+public sealed record ReroutedNode(
+    string DeviceId,
+    int HopsBefore,
+    int HopsAfter,
+    string ViaBefore,
+    string ViaAfter);
 
 // What happens to the mesh when one node is lost.
 public sealed class FailureImpactResult
@@ -266,7 +290,7 @@ public sealed class FailureImpactResult
     // Devices that can no longer reach the gateway at all.
     public List<string> StrandedDevices { get; set; } = [];
 
-    // Devices still connected, but via a different number of hops.
+    // Devices still connected, but via a different route.
     public List<ReroutedNode> ReroutedDevices { get; set; } = [];
 
     public double MstWeightBefore { get; set; }
