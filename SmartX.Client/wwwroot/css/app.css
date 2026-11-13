@@ -854,6 +854,190 @@ tr:hover td {
     }
 
 /* ==========================================================================
+   Mesh topology — final PoE
+   ========================================================================== */
+
+/* The mesh drawn as an SVG. Nodes are placed by sub-zone around the
+   gateway, so the picture matches the physical deployment rather than
+   being an arbitrary force layout. */
+.mesh-canvas {
+    width: 100%;
+    height: auto;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: block;
+}
+
+.mesh-link {
+    stroke: var(--border-strong);
+    stroke-width: 1;
+    opacity: 0.5;
+}
+
+    .mesh-link.in-mst {
+        stroke: var(--nominal);
+        stroke-width: 2;
+        opacity: 1;
+    }
+
+    .mesh-link.on-route {
+        stroke: var(--accent);
+        stroke-width: 2.5;
+        opacity: 1;
+    }
+
+    .mesh-link.dead {
+        stroke: var(--spike);
+        stroke-dasharray: 3 3;
+        opacity: 0.4;
+    }
+
+.mesh-node {
+    fill: var(--surface-raised);
+    stroke: var(--border-strong);
+    stroke-width: 1.5;
+    cursor: pointer;
+}
+
+    .mesh-node.gateway {
+        fill: #1d3350;
+        stroke: var(--accent);
+        stroke-width: 2;
+    }
+
+    .mesh-node.offline {
+        fill: var(--offline-bg);
+        stroke: var(--spike);
+        stroke-dasharray: 2 2;
+    }
+
+    .mesh-node.on-route {
+        stroke: var(--accent);
+        stroke-width: 2.5;
+    }
+
+    .mesh-node.selected {
+        stroke: var(--drift);
+        stroke-width: 3;
+    }
+
+.mesh-label {
+    fill: var(--text-dim);
+    font-size: 8px;
+    text-anchor: middle;
+    pointer-events: none;
+    font-family: "Cascadia Mono", Consolas, monospace;
+}
+
+    .mesh-label.gateway {
+        fill: var(--accent);
+        font-size: 9px;
+        font-weight: 700;
+    }
+
+/* Hop-by-hop route display. */
+.route-chain {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    margin-top: 0.75rem;
+}
+
+.route-hop {
+    padding: 0.3rem 0.6rem;
+    background: var(--surface-raised);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    font-size: 0.78rem;
+    font-family: "Cascadia Mono", Consolas, monospace;
+}
+
+    .route-hop.origin {
+        border-color: var(--drift);
+        color: var(--drift);
+    }
+
+    .route-hop.gateway {
+        border-color: var(--accent);
+        color: var(--accent);
+    }
+
+.route-arrow {
+    color: var(--text-faint);
+    font-size: 0.8rem;
+}
+
+/* Rows showing a device rerouting after a failure. */
+.reroute-row {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.6rem;
+    background: var(--bg);
+    border-radius: var(--radius-sm);
+    margin-bottom: 0.3rem;
+    font-size: 0.8rem;
+}
+
+.reroute-old {
+    color: var(--spike);
+    text-decoration: line-through;
+}
+
+.reroute-new {
+    color: var(--nominal);
+}
+
+.healed-banner {
+    padding: 0.7rem 0.9rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--nominal);
+    background: var(--nominal-bg);
+    color: var(--nominal);
+    font-size: 0.85rem;
+    margin-bottom: 0.75rem;
+}
+
+    .healed-banner.broken {
+        border-color: var(--spike);
+        background: var(--spike-bg);
+        color: #ff8f8f;
+    }
+
+/* Tree stats for the AVL panel. */
+.metric-pair {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 0.4rem 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.82rem;
+}
+
+    .metric-pair:last-child {
+        border-bottom: none;
+    }
+
+.metric-key {
+    color: var(--text-dim);
+}
+
+.metric-value {
+    font-family: "Cascadia Mono", Consolas, monospace;
+}
+
+    .metric-value.good {
+        color: var(--nominal);
+    }
+
+    .metric-value.bad {
+        color: var(--spike);
+    }
+
+/* ==========================================================================
    Framework UI — Blazor's error bar and startup loader.
    These rules ship with the template and must be preserved: without the
    display:none below, the error bar is visible at all times rather than

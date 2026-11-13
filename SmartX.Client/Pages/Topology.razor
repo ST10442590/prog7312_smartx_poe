@@ -1,0 +1,675 @@
+﻿@page "/topology"
+@implements IDisposable
+@inject SmartXApiClient Api
+
+<PageTitle>Smart-X — Network Topology and Mesh Routing</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1>Network Topology and Mesh Routing</h1>
+        <p class="page-sub">
+            The mesh as a weighted graph. Breadth-first traversal finds routes,
+            Prim's algorithm finds the cheapest set of links that still reaches
+            every node, and an AVL tree answers questions about each node's
+            history.
+        </p>
+    </div>
+
+    <span class="link-state">
+        <span class="link-dot @(_online ? "online" : "")"></span>
+        @(_online ? "Gateway online" : "Gateway unreachable")
+    </span>
+</div>
+
+@if (!_online && _loaded)
+{
+    <div class="alert bad">
+        The gateway is not responding. Start the API with
+        <code>dotnet run --project SmartX.Api</code>.
+    </div>
+}
+
+<div class="stat-row">
+    <div class="stat">
+        <div class="stat-label">Nodes</div>
+        <div class="stat-value">@(_graph?.Vertices ?? 0)</div>
+    </div>
+    <div class="stat">
+        <div class="stat-label">Radio links</div>
+        <div class="stat-value">@(_graph?.Edges ?? 0)</div>
+    </div>
+    <div class="stat is-nominal">
+        <div class="stat-label">MST links</div>
+        <div class="stat-value">@(_mst?.EdgeCount ?? 0)</div>
+    </div>
+    <div class="stat is-nominal">
+        <div class="stat-label">Power saved</div>
+        <div class="stat-value">@(_mst?.SavingPercent ?? 0)%</div>
+    </div>
+    <div class="stat">
+        <div class="stat-label">Reachable</div>
+        <div class="stat-value">@(_reach?.Visited ?? 0)</div>
+    </div>
+    <div class="stat @((_reach?.Unreachable.Count ?? 0) > 0 ? "is-spike" : "")">
+        <div class="stat-label">Stranded</div>
+        <div class="stat-value">@(_reach?.Unreachable.Count ?? 0)</div>
+    </div>
+</div>
+
+@* ------------------------------------------------------- the diagram *@
+<div class="card">
+    <div class="page-head" style="margin-bottom:0.75rem;">
+        <h2>Mesh topology</h2>
+        <div>
+            <button class="ghost small" @onclick="() => _showMstOnly = !_showMstOnly">
+                @(_showMstOnly ? "Show all links" : "Show MST only")
+            </button>
+        </div>
+    </div>
+
+    <p class="page-sub">
+        Nodes are positioned by sub-zone around the gateway. Green links are
+        in the minimum spanning tree; blue is the traced route; grey links
+        exist but cost more than the alternatives.
+    </p>
+
+    @if (_graph is not null)
+    {
+        <svg class="mesh-canvas" viewBox="0 0 800 460"
+             preserveAspectRatio="xMidYMid meet" role="img"
+             aria-label="Mesh network topology diagram">
+
+            @* Links first, so nodes draw on top of them. *@
+            @foreach (var link in _graph.Links)
+            {
+                var a = PositionOf(link.From);
+                var b = PositionOf(link.To);
+                var inMst = IsInMst(link.From, link.To);
+                var onRoute = IsOnRoute(link.From, link.To);
+                var dead = !IsOnline(link.From) || !IsOnline(link.To);
+
+                if (_showMstOnly && !inMst && !onRoute) continue;
+
+                <line class="mesh-link @(onRoute ? "on-route" : inMst ? "in-mst" : "") @(dead ? "dead" : "")"
+                      x1="@a.X" y1="@a.Y" x2="@b.X" y2="@b.Y">
+                    <title>@link.From to @link.To — cost @link.Weight</title>
+                </line>
+            }
+
+            @foreach (var node in _graph.Nodes)
+            {
+                var position = PositionOf(node.Id);
+                var isGateway = node.Id == "GATEWAY";
+                var radius = isGateway ? 18 : 11;
+
+                <circle class="mesh-node @(isGateway ? "gateway" : "") @(node.Online ? "" : "offline") @(IsNodeOnRoute(node.Id) ? "on-route" : "") @(node.Id == _selectedDevice ? "selected" : "")"
+                        cx="@position.X" cy="@position.Y" r="@radius"
+                        @onclick="() => SelectAsync(node.Id)">
+                    <title>@node.Id — @node.Degree links, @(node.Online ? "online" : "offline")</title>
+                </circle>
+
+                @* Razor treats a bare <text> tag as its own control element,
+                   so the SVG text node is emitted as a markup string. *@
+                @((MarkupString)$"""
+                    <text class="mesh-label {(isGateway ? "gateway" : "")}"
+                          x="{position.X}"
+                          y="{position.Y + (isGateway ? 32 : 24)}">{ShortName(node.Id)}</text>
+                """)
+            }
+        </svg>
+    }
+    else
+    {
+        <div class="empty">Building the topology…</div>
+    }
+</div>
+
+<div class="two-col">
+    <div>
+        @* ------------------------------------------- route tracing *@
+        <div class="card">
+            <h2>Trace a route</h2>
+            <p class="page-sub">
+                Breadth-first search from the device outward. BFS visits in
+                order of hop count, so the first route it finds to the gateway
+                is the shortest one.
+            </p>
+
+            <div class="search-row">
+                <div class="field">
+                    <label for="route-device">Device or MAC address</label>
+                    <select id="route-device" @bind="_selectedDevice">
+                        @foreach (var profile in _profiles)
+                        {
+                            <option value="@profile.Id">
+                                @profile.DisplayName — @profile.MacAddress
+                            </option>
+                        }
+                    </select>
+                </div>
+                <button @onclick="() => SelectAsync(_selectedDevice)" disabled="@_busy">
+                    Trace route
+                </button>
+            </div>
+
+            @if (_route is not null)
+            {
+                @if (_route.Hops < 0 || _route.Route.Count == 0)
+                {
+                    <div class="alert bad">
+                        No route to the gateway. This device is offline or has
+                        been cut off from the mesh.
+                    </div>
+                }
+                else
+                {
+                    <p class="page-sub">
+                        <strong>@_route.Hops</strong> hop(s) to the gateway.
+                    </p>
+
+                    <div class="route-chain">
+                        @for (var i = 0; i < _route.Route.Count; i++)
+                        {
+                            var hop = _route.Route[i];
+                            var isFirst = i == 0;
+                            var isLast = i == _route.Route.Count - 1;
+
+                            <span class="route-hop @(isFirst ? "origin" : "") @(isLast ? "gateway" : "")">
+                                @hop
+                            </span>
+
+                            if (!isLast)
+                            {
+                                <span class="route-arrow">→</span>
+                            }
+                        }
+                    </div>
+                }
+            }
+        </div>
+
+        @* ------------------------------------------ failure simulation *@
+        <div class="card">
+            <h2>Simulate a node failure</h2>
+            <p class="page-sub">
+                Removes a node from the graph and recalculates. A mesh heals by
+                finding new paths; a star topology cannot, because every device
+                has only one link.
+            </p>
+
+            <div class="search-row">
+                <div class="field">
+                    <label for="fail-device">Node to take offline</label>
+                    <select id="fail-device" @bind="_failureDevice">
+                        @foreach (var profile in _profiles)
+                        {
+                            <option value="@profile.Id">@profile.DisplayName</option>
+                        }
+                    </select>
+                </div>
+                <button @onclick="SimulateFailureAsync" disabled="@_busy">
+                    Take it offline
+                </button>
+            </div>
+
+            @if (_failure is not null)
+            {
+                <div class="healed-banner @(_failure.MeshHealed ? "" : "broken")">
+                    @if (_failure.MeshHealed)
+                    {
+                        <span>
+                            Mesh healed. All @_failure.ReachableAfter remaining
+                            nodes still reach the gateway, recalculated in
+                            @_failure.RecalculationMs ms.
+                        </span>
+                    }
+                    else
+                    {
+                        <span>
+                            Mesh fragmented. @_failure.StrandedDevices.Count
+                            device(s) can no longer reach the gateway.
+                        </span>
+                    }
+                </div>
+
+                <div class="metric-pair">
+                    <span class="metric-key">Reachable before / after</span>
+                    <span class="metric-value">
+                        @_failure.ReachableBefore → @_failure.ReachableAfter
+                    </span>
+                </div>
+                <div class="metric-pair">
+                    <span class="metric-key">MST cost before / after</span>
+                    <span class="metric-value @(_failure.MstWeightAfter > _failure.MstWeightBefore ? "bad" : "good")">
+                        @_failure.MstWeightBefore → @_failure.MstWeightAfter
+                    </span>
+                </div>
+
+                @if (_failure.StrandedDevices.Count > 0)
+                {
+                    <h3 style="margin-top:1rem;">Stranded</h3>
+                    @foreach (var device in _failure.StrandedDevices)
+                    {
+                        <div class="reroute-row">
+                            <span class="reroute-old">@device</span>
+                            <span class="route-arrow">✕</span>
+                            <span style="color:var(--spike);">no route</span>
+                        </div>
+                    }
+                }
+
+                @if (_failure.ReroutedDevices.Count > 0)
+                {
+                    <h3 style="margin-top:1rem;">
+                        Rerouted (@_failure.ReroutedDevices.Count)
+                    </h3>
+                    @foreach (var reroute in _failure.ReroutedDevices)
+                    {
+                        <div class="reroute-row">
+                            <span>
+                                <strong>@reroute.DeviceId</strong>
+                                <span class="reroute-old">&nbsp;via @reroute.ViaBefore</span>
+                            </span>
+                            <span class="route-arrow">→</span>
+                            <span class="reroute-new">
+                                via @reroute.ViaAfter
+                                (@reroute.HopsAfter hop@(reroute.HopsAfter == 1 ? "" : "s"))
+                            </span>
+                        </div>
+                    }
+                }
+                else if (_failure.MeshHealed)
+                {
+                    <p class="page-sub" style="margin-top:0.75rem;">
+                        Nothing rerouted — no traffic was passing through this
+                        node, so it is a leaf rather than a relay.
+                    </p>
+                }
+            }
+        </div>
+
+        @* ------------------------------------------- history queries *@
+        <div class="card">
+            <h2>Historical telemetry</h2>
+            <p class="page-sub">
+                Each device keeps its readings in a self-balancing AVL tree
+                keyed on timestamp. A range query prunes whole subtrees that
+                cannot contain anything in the window, rather than scanning.
+            </p>
+
+            <div class="search-row">
+                <div class="field">
+                    <label for="hist-minutes">Window (minutes)</label>
+                    <select id="hist-minutes" @bind="_historyMinutes">
+                        <option value="1">Last 1 minute</option>
+                        <option value="5">Last 5 minutes</option>
+                        <option value="15">Last 15 minutes</option>
+                    </select>
+                </div>
+                <button @onclick="QueryHistoryAsync" disabled="@_busy">
+                    Query history
+                </button>
+                <button class="ghost" @onclick="CompareRangeAsync" disabled="@_busy">
+                    Compare with linear scan
+                </button>
+            </div>
+
+            @if (_history is not null)
+            {
+                <div class="metric-pair">
+                    <span class="metric-key">Readings in tree</span>
+                    <span class="metric-value">@_history.TreeSize</span>
+                </div>
+                <div class="metric-pair">
+                    <span class="metric-key">Tree height (balanced)</span>
+                    <span class="metric-value good">@_history.TreeHeight</span>
+                </div>
+                <div class="metric-pair">
+                    <span class="metric-key">Height if unbalanced</span>
+                    <span class="metric-value bad">@_history.UnbalancedHeight</span>
+                </div>
+                <div class="metric-pair">
+                    <span class="metric-key">Matches in window</span>
+                    <span class="metric-value">@_history.MatchCount</span>
+                </div>
+            }
+
+            @if (_comparison is not null)
+            {
+                <h3 style="margin-top:1rem;">Tree query versus linear scan</h3>
+                <table>
+                    <thead>
+                        <tr><th>Strategy</th><th>Comparisons</th><th>Matches</th><th>Time</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>AVL range query</td>
+                            <td>@_comparison.TreeComparisons</td>
+                            <td>@_comparison.MatchCount</td>
+                            <td>@_comparison.TreeElapsedMs ms</td>
+                        </tr>
+                        <tr>
+                            <td>Linear scan</td>
+                            <td>@_comparison.ScanComparisons</td>
+                            <td>@_comparison.ScanMatchCount</td>
+                            <td>@_comparison.ScanElapsedMs ms</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <p class="page-sub" style="margin-top:0.5rem;">
+                    The tree skipped <strong>@_comparison.PrunedPercent%</strong>
+                    of the data. Both found the same number of matches, which is
+                    the correctness check.
+                </p>
+            }
+        </div>
+    </div>
+
+    @* ------------------------------------------------------ side rail *@
+    <div>
+        <div class="card">
+            <h2>Minimum spanning tree</h2>
+            <p class="page-sub">
+                Prim's algorithm, grown outward from the gateway using a
+                hand-written binary min-heap.
+            </p>
+
+            @if (_mst is not null)
+            {
+                <div class="metric-pair">
+                    <span class="metric-key">Spans</span>
+                    <span class="metric-value">@_mst.VerticesSpanned nodes</span>
+                </div>
+                <div class="metric-pair">
+                    <span class="metric-key">Using</span>
+                    <span class="metric-value">@_mst.EdgeCount links</span>
+                </div>
+                <div class="metric-pair">
+                    <span class="metric-key">MST cost</span>
+                    <span class="metric-value good">@_mst.TotalWeight</span>
+                </div>
+                <div class="metric-pair">
+                    <span class="metric-key">All links powered</span>
+                    <span class="metric-value bad">@_mst.AllLinksWeight</span>
+                </div>
+                <div class="metric-pair">
+                    <span class="metric-key">Saving</span>
+                    <span class="metric-value good">@_mst.SavingPercent%</span>
+                </div>
+                <div class="metric-pair">
+                    <span class="metric-key">Complete spanning tree</span>
+                    <span class="metric-value @(_mst.IsComplete ? "good" : "bad")">
+                        @(_mst.IsComplete ? "yes" : "no")
+                    </span>
+                </div>
+                <div class="metric-pair">
+                    <span class="metric-key">Heap comparisons</span>
+                    <span class="metric-value">@_mst.HeapComparisons</span>
+                </div>
+            }
+            else
+            {
+                <div class="empty">Not calculated yet.</div>
+            }
+        </div>
+
+        <div class="card">
+            <h2>Hops from gateway</h2>
+            <p class="page-sub">
+                Breadth-first search. Nodes one hop out talk to the gateway
+                directly; the rest relay through neighbours.
+            </p>
+
+            @if (_reach is not null)
+            {
+                @foreach (var group in _reach.Reachable.GroupBy(r => r.Hops).OrderBy(g => g.Key))
+                {
+                    <div class="metric-pair">
+                        <span class="metric-key">
+                            @(group.Key == 0 ? "Gateway" : $"{group.Key} hop{(group.Key == 1 ? "" : "s")}")
+                        </span>
+                        <span class="metric-value">@group.Count() node(s)</span>
+                    </div>
+                }
+
+                @if (_reach.Unreachable.Count > 0)
+                {
+                    <div class="metric-pair">
+                        <span class="metric-key">Unreachable</span>
+                        <span class="metric-value bad">@_reach.Unreachable.Count</span>
+                    </div>
+                }
+            }
+        </div>
+
+        <div class="card">
+            <h2>AVL trees across the mesh</h2>
+            @if (_overview is not null)
+            {
+                <div class="metric-pair">
+                    <span class="metric-key">Devices with history</span>
+                    <span class="metric-value">@_overview.DeviceCount</span>
+                </div>
+                <div class="metric-pair">
+                    <span class="metric-key">Readings stored</span>
+                    <span class="metric-value">@_overview.TotalReadings.ToString("N0")</span>
+                </div>
+                <div class="metric-pair">
+                    <span class="metric-key">Tallest tree</span>
+                    <span class="metric-value good">@_overview.TallestTree</span>
+                </div>
+                <div class="metric-pair">
+                    <span class="metric-key">Rotations performed</span>
+                    <span class="metric-value">@_overview.TotalRotations.ToString("N0")</span>
+                </div>
+                <p class="page-sub" style="margin-top:0.6rem;">
+                    Rotations are the balancing at work. Timestamps arrive in
+                    ascending order, which is the worst case for an unbalanced
+                    tree — every insert would go right, producing a chain.
+                </p>
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    private List<SensorProfile> _profiles = [];
+    private MeshGraphDto? _graph;
+    private ReachabilityDto? _reach;
+    private MstDto? _mst;
+    private RouteDto? _route;
+    private FailureImpactDto? _failure;
+    private HistoryQueryDto? _history;
+    private RangeComparisonDto? _comparison;
+    private HistoryOverviewDto? _overview;
+
+    private string _selectedDevice = string.Empty;
+    private string _failureDevice = string.Empty;
+    private int _historyMinutes = 5;
+
+    private bool _showMstOnly;
+    private bool _online;
+    private bool _loaded;
+    private bool _busy;
+
+    private CancellationTokenSource? _cts;
+    private PeriodicTimer? _timer;
+
+    // Node positions, computed once from the graph so the diagram does not
+    // jump between polls.
+    private readonly Dictionary<string, (double X, double Y)> _positions =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    protected override async Task OnInitializedAsync()
+    {
+        _cts = new CancellationTokenSource();
+
+        var profiles = await Api.GetDevicesAsync();
+        _profiles = profiles.OrderBy(p => p.DisplayName).ToList();
+
+        _selectedDevice = _profiles.FirstOrDefault()?.Id ?? string.Empty;
+        _failureDevice = _profiles.FirstOrDefault()?.Id ?? string.Empty;
+
+        await RefreshAsync();
+        _loaded = true;
+
+        // Slow poll: the topology changes only when a node drops out, so
+        // there is nothing to gain from hammering it.
+        _timer = new PeriodicTimer(TimeSpan.FromSeconds(3));
+        _ = PollAsync(_cts.Token);
+    }
+
+    private async Task PollAsync(CancellationToken ct)
+    {
+        try
+        {
+            while (_timer is not null && await _timer.WaitForNextTickAsync(ct))
+            {
+                await RefreshAsync();
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException)
+        {
+            // Component disposed mid-poll during navigation. Expected.
+        }
+    }
+
+    private async Task RefreshAsync()
+    {
+        var ct = _cts?.Token ?? CancellationToken.None;
+
+        var graph = await Api.GetMeshGraphAsync(ct);
+        _online = graph is not null;
+
+        if (graph is not null)
+        {
+            _graph = graph;
+            ComputePositions(graph);
+        }
+
+        _reach = await Api.GetReachabilityAsync(ct) ?? _reach;
+        _mst = await Api.GetMstAsync(ct) ?? _mst;
+        _overview = await Api.GetHistoryOverviewAsync(ct) ?? _overview;
+    }
+
+    // Lays the mesh out as concentric arcs: the gateway at the centre, and
+    // each sub-zone occupying its own sector. Deterministic, so the diagram
+    // is stable across refreshes and readable on video.
+    private void ComputePositions(MeshGraphDto graph)
+    {
+        if (_positions.Count == graph.Nodes.Count) return;
+
+        _positions.Clear();
+        _positions["GATEWAY"] = (400, 230);
+
+        var devices = graph.Nodes
+            .Where(n => n.Id != "GATEWAY")
+            .OrderBy(n => n.Id, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        // Six nodes per sub-zone in the seeded mesh, so group in sixes.
+        const int perGroup = 6;
+        var groupCount = Math.Max(1, (int)Math.Ceiling(devices.Count / (double)perGroup));
+
+        for (var i = 0; i < devices.Count; i++)
+        {
+            var group = i / perGroup;
+            var withinGroup = i % perGroup;
+
+            // Each group gets a sector of the circle.
+            var sectorCentre = 2 * Math.PI * group / groupCount - Math.PI / 2;
+            var spread = 2 * Math.PI / groupCount * 0.7;
+            var angle = sectorCentre + spread * (withinGroup / (double)(perGroup - 1) - 0.5);
+
+            // Alternate two radii so labels do not collide.
+            var radius = withinGroup % 2 == 0 ? 160 : 205;
+
+            _positions[devices[i].Id] = (
+                Math.Round(400 + radius * Math.Cos(angle), 1),
+                Math.Round(230 + radius * Math.Sin(angle), 1));
+        }
+    }
+
+    private (double X, double Y) PositionOf(string id) =>
+        _positions.TryGetValue(id, out var position) ? position : (400, 230);
+
+    private bool IsOnline(string id) =>
+        _graph?.Nodes.FirstOrDefault(n =>
+            string.Equals(n.Id, id, StringComparison.OrdinalIgnoreCase))?.Online ?? true;
+
+    private bool IsInMst(string from, string to) =>
+        _mst is not null && _mst.Edges.Any(e =>
+            (string.Equals(e.From, from, StringComparison.OrdinalIgnoreCase) &&
+             string.Equals(e.To, to, StringComparison.OrdinalIgnoreCase)) ||
+            (string.Equals(e.From, to, StringComparison.OrdinalIgnoreCase) &&
+             string.Equals(e.To, from, StringComparison.OrdinalIgnoreCase)));
+
+    private bool IsOnRoute(string from, string to)
+    {
+        if (_route?.Route is not { Count: > 1 } route) return false;
+
+        for (var i = 0; i < route.Count - 1; i++)
+        {
+            var matches =
+                (string.Equals(route[i], from, StringComparison.OrdinalIgnoreCase) &&
+                 string.Equals(route[i + 1], to, StringComparison.OrdinalIgnoreCase)) ||
+                (string.Equals(route[i], to, StringComparison.OrdinalIgnoreCase) &&
+                 string.Equals(route[i + 1], from, StringComparison.OrdinalIgnoreCase));
+
+            if (matches) return true;
+        }
+
+        return false;
+    }
+
+    private bool IsNodeOnRoute(string id) =>
+        _route?.Route.Contains(id, StringComparer.OrdinalIgnoreCase) ?? false;
+
+    private static string ShortName(string id) =>
+        id == "GATEWAY" ? "GATEWAY" : id.Replace("ESP32-", "");
+
+    private async Task SelectAsync(string deviceId)
+    {
+        if (string.IsNullOrWhiteSpace(deviceId) || deviceId == "GATEWAY") return;
+
+        _busy = true;
+        _selectedDevice = deviceId;
+        _route = await Api.GetRouteAsync(deviceId);
+        _busy = false;
+    }
+
+    private async Task SimulateFailureAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_failureDevice)) return;
+
+        _busy = true;
+        _failure = await Api.SimulateFailureAsync(_failureDevice);
+        _busy = false;
+    }
+
+    private async Task QueryHistoryAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_selectedDevice)) return;
+
+        _busy = true;
+        _history = await Api.QueryHistoryAsync(_selectedDevice, _historyMinutes);
+        _busy = false;
+    }
+
+    private async Task CompareRangeAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_selectedDevice)) return;
+
+        _busy = true;
+        _comparison = await Api.CompareRangeAsync(_selectedDevice, 30, 20);
+        _busy = false;
+    }
+
+    public void Dispose()
+    {
+        _cts?.Cancel();
+        _timer?.Dispose();
+        _cts?.Dispose();
+    }
+}

@@ -1,0 +1,33 @@
+﻿@inject NavigationManager Nav
+
+<nav class="sidebar">
+    <div class="brand">
+        <div class="brand-name">Smart-X</div>
+        <div class="brand-sub">IoT Mesh Ecosystem</div>
+    </div>
+
+    <div class="nav-list">
+        @* Pillar one — Part 1. *@
+        <NavLink class="nav-item" href="" Match="NavLinkMatch.All">
+            <span>Sensor Data Ingestion</span>
+        </NavLink>
+
+        <NavLink class="nav-item" href="devices">
+            <span>Sensor Registry</span>
+        </NavLink>
+
+        <NavLink class="nav-item" href="diagnostics">
+            <span>Pipeline Diagnostics</span>
+        </NavLink>
+
+        @* Pillar two — Part 2. *@
+        <NavLink class="nav-item" href="stream">
+            <span>Command Stream</span>
+        </NavLink>
+
+        @* Pillar three — final PoE. All three are now active. *@
+        <NavLink class="nav-item" href="topology">
+            <span>Mesh Topology</span>
+        </NavLink>
+    </div>
+</nav>

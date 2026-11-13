@@ -35,7 +35,6 @@ public sealed class SmartXApiClient
     }
 
     // ------------------------------------------------------- pulse grid
-    // Current Pulse Grid tiles, worst devices first.
     public async Task<IReadOnlyList<DeviceHealthDto>> GetMeshHealthAsync(
         CancellationToken ct = default)
     {
@@ -53,7 +52,6 @@ public sealed class SmartXApiClient
         }
     }
 
-    // Mesh-wide counters for the dashboard header.
     public async Task<MeshSummaryDto?> GetMeshSummaryAsync(
         CancellationToken ct = default)
     {
@@ -123,7 +121,6 @@ public sealed class SmartXApiClient
     }
 
     // -------------------------------------------------------- telemetry
-    // Publishes a single packet, used by the manual test panel.
     public async Task<ApiResult> SendTelemetryAsync(
         TelemetryPacketDto packet, CancellationToken ct = default)
     {
@@ -185,7 +182,6 @@ public sealed class SmartXApiClient
     }
 
     // ------------------------------------------------------ diagnostics
-    // Pipeline counters: received, staged, stored.
     public async Task<PipelineStatsDto?> GetStatsAsync(CancellationToken ct = default)
     {
         try
@@ -199,7 +195,6 @@ public sealed class SmartXApiClient
         }
     }
 
-    // Forces staged batches to drain into the archive.
     public async Task<PipelineStatsDto?> FlushAsync(CancellationToken ct = default)
     {
         try
@@ -217,7 +212,6 @@ public sealed class SmartXApiClient
         }
     }
 
-    // Linear scan over historical readings.
     public async Task<SearchResultDto?> SearchByValueAsync(
         string? deviceId, double min, double max, CancellationToken ct = default)
     {
@@ -237,7 +231,6 @@ public sealed class SmartXApiClient
         }
     }
 
-    // Binary search over the time-ordered archive.
     public async Task<SearchResultDto?> SearchByTimeAsync(
         int secondsAgo, CancellationToken ct = default)
     {
@@ -252,7 +245,6 @@ public sealed class SmartXApiClient
         }
     }
 
-    // Aggregates meters using the overloaded + operator.
     public async Task<AggregationDto?> AggregateAsync(
         IReadOnlyList<string> deviceIds, CancellationToken ct = default)
     {
@@ -271,7 +263,6 @@ public sealed class SmartXApiClient
         }
     }
 
-    // Delta between two sensors using the overloaded - operator.
     public async Task<AggregationDto?> DeltaAsync(
         string left, string right, CancellationToken ct = default)
     {
@@ -302,7 +293,6 @@ public sealed class SmartXApiClient
         }
     }
 
-    // Transmits a generated batch through the ingestion endpoint.
     public async Task<BatchResultDto?> SendBatchAsync(
         IReadOnlyList<TelemetryPacketDto> packets, CancellationToken ct = default)
     {
@@ -322,8 +312,6 @@ public sealed class SmartXApiClient
     }
 
     // --------------------------------------------------- command stream
-    // Live depths of the FIFO queue, priority queue, undo stack and the
-    // active-alert set.
     public async Task<StreamSnapshotDto?> GetStreamSnapshotAsync(
         CancellationToken ct = default)
     {
@@ -338,7 +326,6 @@ public sealed class SmartXApiClient
         }
     }
 
-    // Issues a manual override, which also pushes it onto the undo stack.
     public async Task<CommandResultDto?> IssueCommandAsync(
         IssueCommandDto request, CancellationToken ct = default)
     {
@@ -360,7 +347,6 @@ public sealed class SmartXApiClient
         }
     }
 
-    // Pops the most recent command and applies its inverse.
     public async Task<CommandResultDto?> UndoCommandAsync(CancellationToken ct = default)
     {
         try
@@ -380,8 +366,6 @@ public sealed class SmartXApiClient
         }
     }
 
-    // Injects a test alert, so priority ordering and duplicate suppression
-    // can be demonstrated on demand.
     public async Task<AlertTestResultDto?> SimulateAlertAsync(
         string deviceId, AlertSeverity severity, CancellationToken ct = default)
     {
@@ -433,7 +417,6 @@ public sealed class SmartXApiClient
         }
     }
 
-    // Dismisses a suggestion so an acknowledged problem stops resurfacing.
     public async Task MarkAttendedAsync(string deviceId, CancellationToken ct = default)
     {
         try
@@ -445,6 +428,126 @@ public sealed class SmartXApiClient
         {
             // Dismissing is a convenience, not something worth surfacing a
             // failure for.
+        }
+    }
+
+    // --------------------------------------------------- mesh topology
+    public async Task<MeshGraphDto?> GetMeshGraphAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            return await _http.GetFromJsonAsync<MeshGraphDto>("/api/mesh/graph", ct);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            return null;
+        }
+    }
+
+    public async Task<ReachabilityDto?> GetReachabilityAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            return await _http.GetFromJsonAsync<ReachabilityDto>(
+                "/api/mesh/reachability", ct);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            return null;
+        }
+    }
+
+    public async Task<RouteDto?> GetRouteAsync(
+        string deviceId, CancellationToken ct = default)
+    {
+        try
+        {
+            var response = await _http.GetAsync(
+                $"/api/mesh/route/{Uri.EscapeDataString(deviceId)}", ct);
+
+            // A 404 means stranded, which is a real answer rather than a
+            // failure — the caller needs to show it.
+            return response.IsSuccessStatusCode
+                ? await response.Content.ReadFromJsonAsync<RouteDto>(cancellationToken: ct)
+                : new RouteDto { DeviceId = deviceId, Route = [], Hops = -1 };
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            return null;
+        }
+    }
+
+    public async Task<MstDto?> GetMstAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            return await _http.GetFromJsonAsync<MstDto>("/api/mesh/mst", ct);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            return null;
+        }
+    }
+
+    public async Task<FailureImpactDto?> SimulateFailureAsync(
+        string deviceId, CancellationToken ct = default)
+    {
+        try
+        {
+            using var response = await _http.PostAsync(
+                $"/api/mesh/simulate-failure/{Uri.EscapeDataString(deviceId)}", null, ct);
+
+            return response.IsSuccessStatusCode
+                ? await response.Content.ReadFromJsonAsync<FailureImpactDto>(cancellationToken: ct)
+                : null;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            return null;
+        }
+    }
+
+    // ------------------------------------------------- telemetry history
+    public async Task<HistoryQueryDto?> QueryHistoryAsync(
+        string deviceId, int minutes, CancellationToken ct = default)
+    {
+        try
+        {
+            return await _http.GetFromJsonAsync<HistoryQueryDto>(
+                $"/api/history/{Uri.EscapeDataString(deviceId)}/recent?minutes={minutes}", ct);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            return null;
+        }
+    }
+
+    public async Task<RangeComparisonDto?> CompareRangeAsync(
+        string deviceId, int fromSecondsAgo, int toSecondsAgo,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            return await _http.GetFromJsonAsync<RangeComparisonDto>(
+                $"/api/history/{Uri.EscapeDataString(deviceId)}/compare" +
+                $"?fromSecondsAgo={fromSecondsAgo}&toSecondsAgo={toSecondsAgo}", ct);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            return null;
+        }
+    }
+
+    public async Task<HistoryOverviewDto?> GetHistoryOverviewAsync(
+        CancellationToken ct = default)
+    {
+        try
+        {
+            return await _http.GetFromJsonAsync<HistoryOverviewDto>("/api/history", ct);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            return null;
         }
     }
 
@@ -494,4 +597,93 @@ public sealed class DeviceSearchResultDto
     public string Query { get; set; } = string.Empty;
     public int Count { get; set; }
     public List<SensorProfile> Devices { get; set; } = [];
+}
+
+// The mesh topology as the API reports it.
+public sealed class MeshGraphDto
+{
+    public int Vertices { get; set; }
+    public int Edges { get; set; }
+    public DateTimeOffset BuiltAtUtc { get; set; }
+    public List<MeshNodeDto> Nodes { get; set; } = [];
+    public List<MeshLinkDto> Links { get; set; } = [];
+}
+
+public sealed class MeshNodeDto
+{
+    public string Id { get; set; } = string.Empty;
+    public bool Online { get; set; }
+
+    // How many neighbours this node can reach directly. A high degree means
+    // losing it matters more.
+    public int Degree { get; set; }
+}
+
+public sealed class MeshLinkDto
+{
+    public string From { get; set; } = string.Empty;
+    public string To { get; set; } = string.Empty;
+    public double Weight { get; set; }
+}
+
+public sealed class ReachabilityDto
+{
+    public string Algorithm { get; set; } = string.Empty;
+    public string Start { get; set; } = string.Empty;
+    public int Visited { get; set; }
+    public int EdgesExamined { get; set; }
+    public List<HopEntryDto> Reachable { get; set; } = [];
+    public List<string> Unreachable { get; set; } = [];
+}
+
+public sealed class HopEntryDto
+{
+    public string Device { get; set; } = string.Empty;
+    public int Hops { get; set; }
+}
+
+public sealed class RouteDto
+{
+    public string DeviceId { get; set; } = string.Empty;
+
+    // -1 means no route exists: the device is stranded or offline.
+    public int Hops { get; set; }
+    public List<string> Route { get; set; } = [];
+}
+
+public sealed class MstDto
+{
+    public string Algorithm { get; set; } = string.Empty;
+    public string Start { get; set; } = string.Empty;
+    public int VerticesSpanned { get; set; }
+    public int EdgeCount { get; set; }
+    public double TotalWeight { get; set; }
+    public double AllLinksWeight { get; set; }
+    public double SavingPercent { get; set; }
+    public bool IsComplete { get; set; }
+    public int EdgesExamined { get; set; }
+    public long HeapComparisons { get; set; }
+    public List<MeshLinkDto> Edges { get; set; } = [];
+}
+
+public sealed class FailureImpactDto
+{
+    public string FailedDevice { get; set; } = string.Empty;
+    public int ReachableBefore { get; set; }
+    public int ReachableAfter { get; set; }
+    public List<string> StrandedDevices { get; set; } = [];
+    public List<ReroutedNodeDto> ReroutedDevices { get; set; } = [];
+    public double MstWeightBefore { get; set; }
+    public double MstWeightAfter { get; set; }
+    public bool MeshHealed { get; set; }
+    public double RecalculationMs { get; set; }
+}
+
+public sealed class ReroutedNodeDto
+{
+    public string DeviceId { get; set; } = string.Empty;
+    public int HopsBefore { get; set; }
+    public int HopsAfter { get; set; }
+    public string ViaBefore { get; set; } = string.Empty;
+    public string ViaAfter { get; set; } = string.Empty;
 }
